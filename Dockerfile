@@ -13,7 +13,9 @@ ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 ENV DEBIAN_FRONTEND=noninteractive
 
 # --- System Setup ---
-RUN apt-get update -qq && \
+# Fail fast if any command in this RUN block fails
+RUN set -e && \
+    apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
@@ -44,20 +46,27 @@ RUN apt-get update -qq && \
     # Set python3 to point to the installed Python version
     update-alternatives --install /usr/bin/python3 python3 "/usr/bin/python${PYTHON_VERSION_TARGET}" 1 && \
     # --- uv Installation (Fast Python Package Installer) ---
-    # Download install script, make executable, then run it, then remove script
-    echo "Attempting to install uv version ${UV_VERSION}" && \
+    # Download precompiled binary directly from GitHub Releases
+    echo "Attempting to install uv version ${UV_VERSION} by direct binary download" && \
     mkdir -p /opt/uv_install/bin && \
-    curl -LsSf https://astral.sh/uv/install.sh -o /tmp/install_uv.sh && \
-    chmod +x /tmp/install_uv.sh && \
-    sh /tmp/install_uv.sh --version "${UV_VERSION}" --dest /opt/uv_install/bin && \
-    rm /tmp/install_uv.sh && \
-    # Verify uv installation by checking its presence and running 'uv version'
+    # Determine architecture for uv binary download
+    DPKG_ARCH=$(dpkg --print-architecture) && \
+    case "$DPKG_ARCH" in \
+        amd64) UV_PLATFORM_ARCH="x86_64-unknown-linux-gnu";; \
+        arm64) UV_PLATFORM_ARCH="aarch64-unknown-linux-gnu";; \
+        *) echo "Unsupported architecture for uv binary: $DPKG_ARCH"; exit 1;; \
+    esac && \
+    curl -LsSf "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${UV_PLATFORM_ARCH}.tar.gz" -o "/tmp/uv.tar.gz" && \
+    # Extract only the 'uv' executable directly into the target bin directory
+    tar -xzf "/tmp/uv.tar.gz" -C /opt/uv_install/bin uv && \
+    rm "/tmp/uv.tar.gz" && \
+    # Verify uv installation
     ls -l /opt/uv_install/bin/uv && \
-    /opt/uv_install/bin/uv version && \
+    /opt/uv_install/bin/uv --version && \
     # --- Python Virtual Environment & Package Installation using uv ---
     # Create a virtual environment
     python3 -m venv /opt/venv && \
-    # Install Python packages into the venv using the globally available uv
+    # Install Python packages into the venv using the installed uv
     /opt/uv_install/bin/uv pip install --no-cache --python /opt/venv/bin/python \
         google-cloud-bigquery~=3.18.0 \
         pandas~=2.1.4 \
@@ -78,23 +87,13 @@ RUN apt-get update -qq && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache
 
 # --- Application Setup ---
-# Define a consistent workspace directory for application code and data
 WORKDIR /opt/analysis_workspace
 
-# Create the target directory for bin scripts explicitly
-RUN mkdir -p /opt/analysis_workspace/bin
-
-# Make scripts executable
-# This command might produce a non-fatal error if /opt/analysis_workspace/bin/ is empty after the COPY.
-RUN chmod +x /opt/analysis_workspace/bin/*.py || true
-
-# Final PATH and PYTHONPATH configuration
-# Add the Python virtual environment's bin, uv's bin to PATH.
+# Final PATH configuration
+# Add the Python virtual environment's bin and uv's bin to PATH.
 # /usr/local/bin (where nextflow is) is typically in PATH by default.
-# Set PYTHONPATH to include the application scripts directory.
-# The base image does not set PYTHONPATH, so define it directly.
-ENV PYTHONPATH=/opt/analysis_workspace/bin \
-    PATH="/opt/venv/bin:/opt/uv_install/bin:${PATH}"
+# PYTHONPATH is not set as no custom scripts are being added from a 'bin/' directory.
+ENV PATH="/opt/venv/bin:/opt/uv_install/bin:${PATH}"
 
 # --- Default Command ---
 # Provides a basic test of the image; Nextflow will override this for task execution.
