@@ -64,7 +64,7 @@ RUN apt-get update -qq && \
     cd /opt && \
     curl -fsSL "https://get.nextflow.io" | bash -s "v${NEXTFLOW_VERSION}" && \
     mv nextflow /usr/local/bin/nextflow && \
-    cd / && \ # Return to root or let WORKDIR handle context
+    cd / && \
     # --- Cleanup ---
     # Remove build-only dependencies and PPA config to reduce image size
     apt-get purge -y --auto-remove build-essential software-properties-common gnupg && \
