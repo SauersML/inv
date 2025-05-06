@@ -44,11 +44,16 @@ RUN apt-get update -qq && \
     # Set python3 to point to the installed Python version
     update-alternatives --install /usr/bin/python3 python3 "/usr/bin/python${PYTHON_VERSION_TARGET}" 1 && \
     # --- uv Installation (Fast Python Package Installer) ---
-    # Download and install uv to a dedicated location
+    # Download install script, make executable, then run it, then remove script
+    echo "Attempting to install uv version ${UV_VERSION}" && \
     mkdir -p /opt/uv_install/bin && \
-    curl -LsSf https://astral.sh/uv/install.sh | sh -s -- --version "${UV_VERSION}" --dest /opt/uv_install/bin && \
-    # Verify uv installation
-    /opt/uv_install/bin/uv --version && \
+    curl -LsSf https://astral.sh/uv/install.sh -o /tmp/install_uv.sh && \
+    chmod +x /tmp/install_uv.sh && \
+    sh /tmp/install_uv.sh --version "${UV_VERSION}" --dest /opt/uv_install/bin && \
+    rm /tmp/install_uv.sh && \
+    # Verify uv installation by checking its presence and running 'uv version'
+    ls -l /opt/uv_install/bin/uv && \
+    /opt/uv_install/bin/uv version && \
     # --- Python Virtual Environment & Package Installation using uv ---
     # Create a virtual environment
     python3 -m venv /opt/venv && \
@@ -80,13 +85,14 @@ WORKDIR /opt/analysis_workspace
 RUN mkdir -p /opt/analysis_workspace/bin
 
 # Make scripts executable
-RUN chmod +x /opt/analysis_workspace/bin/*.py
+# This command might produce a non-fatal error if /opt/analysis_workspace/bin/ is empty after the COPY.
+RUN chmod +x /opt/analysis_workspace/bin/*.py || true
 
 # Final PATH and PYTHONPATH configuration
 # Add the Python virtual environment's bin, uv's bin to PATH.
 # /usr/local/bin (where nextflow is) is typically in PATH by default.
 # Set PYTHONPATH to include the application scripts directory.
-# The base image does not set PYTHONPATH, so we define it directly.
+# The base image does not set PYTHONPATH, so define it directly.
 ENV PYTHONPATH=/opt/analysis_workspace/bin \
     PATH="/opt/venv/bin:/opt/uv_install/bin:${PATH}"
 
