@@ -76,8 +76,8 @@ RUN apt-get update -qq && \
 # Define a consistent workspace directory for application code and data
 WORKDIR /opt/analysis_workspace
 
-# Copy application-specific scripts from the 'bin' directory in the build context
-COPY bin/ /opt/analysis_workspace/bin/
+# Create the target directory for bin scripts explicitly
+RUN mkdir -p /opt/analysis_workspace/bin
 
 # Make scripts executable
 RUN chmod +x /opt/analysis_workspace/bin/*.py
@@ -85,8 +85,9 @@ RUN chmod +x /opt/analysis_workspace/bin/*.py
 # Final PATH and PYTHONPATH configuration
 # Add the Python virtual environment's bin, uv's bin to PATH.
 # /usr/local/bin (where nextflow is) is typically in PATH by default.
-# Add the application scripts directory to PYTHONPATH.
-ENV PYTHONPATH=/opt/analysis_workspace/bin:${PYTHONPATH} \
+# Set PYTHONPATH to include the application scripts directory.
+# The base image does not set PYTHONPATH, so we define it directly.
+ENV PYTHONPATH=/opt/analysis_workspace/bin \
     PATH="/opt/venv/bin:/opt/uv_install/bin:${PATH}"
 
 # --- Default Command ---
