@@ -5,16 +5,15 @@ set -euo pipefail
 
 # --- Configuration ---
 GHCR_REGISTRY="ghcr.io"
-GITHUB_OWNER="SauersML"
-IMAGE_BASE_NAME="aou-analysis-runner" # From env.IMAGE_BASE_NAME in GHA workflow
-IMAGE_VERSION="latest"                # The GHA workflow pushes 'latest' for the main branch
+GITHUB_OWNER="sauersml" # lowercase for Docker image path compatibility
+IMAGE_BASE_NAME="aou-analysis-runner"
+IMAGE_VERSION="latest"
 
 TARGET_IMAGE="${GHCR_REGISTRY}/${GITHUB_OWNER}/${IMAGE_BASE_NAME}:${IMAGE_VERSION}"
 
 # Command(s) to run inside the Docker container.
 # This can be overridden by setting the AOC_COMMAND_IN_CONTAINER environment variable
 # before running this script.
-# Example: export AOC_COMMAND_IN_CONTAINER="nextflow run hello -profile test,docker"
 AOC_DEFAULT_COMMAND="echo '--- Running inside Docker container ---'; \
 echo 'Date: $(date)'; \
 echo 'User: $(whoami)'; \
@@ -31,8 +30,7 @@ log() {
 }
 
 # --- dsub Helper Function (adapted for AoU environment) ---
-# This function is based on common AoU patterns (e.g., PGS Catalog examples)
-# It defines how 'dsub' is called with AoU-specific parameters.
+# This function defines how 'dsub' is called with AoU-specific parameters.
 aou_dsub () {
   if [[ -z "${OWNER_EMAIL:-}" || -z "${GOOGLE_PROJECT:-}" || -z "${WORKSPACE_BUCKET:-}" ]]; then
     log "ERROR: OWNER_EMAIL, GOOGLE_PROJECT, and WORKSPACE_BUCKET environment variables must be set to use aou_dsub."
@@ -51,7 +49,7 @@ aou_dsub () {
     log "In the All of Us Researcher Workbench terminal, dsub should be available."
     return 1
   fi
-  
+
   local service_account
   service_account=$(gcloud config get-value account 2>/dev/null)
   if [[ -z "$service_account" ]]; then
@@ -60,7 +58,7 @@ aou_dsub () {
   fi
 
   log "Submitting dsub job with user: ${DSUB_USER_NAME}, project: ${GOOGLE_PROJECT}, service-account: ${service_account}"
-  
+
   # The --logging path is critical. It uses dsub placeholders.
   # {job-name}, {user-id}, {job-id} will be filled by dsub.
   # The date part in the log path is when dsub processes the job, not when this script runs.
@@ -121,7 +119,6 @@ echo "Working directory: \$(pwd)"
 echo "User: \$(whoami)"
 
 # Add any environment setup needed within the container *before* the main command
-# For example: export SOME_VARIABLE="some_value"
 # The PATH should already include /opt/venv/bin from your Dockerfile.
 
 # Execute the user-defined command
@@ -131,9 +128,6 @@ echo "--- dsub entrypoint script finished at \$(date) ---"
 EOF
 chmod +x "${DSUB_ENTRYPOINT_SCRIPT_PATH}"
 log "Temporary dsub entrypoint script created successfully."
-# For debugging, you can uncomment the next line to see the script content (first few lines)
-# log "Entrypoint script content (first 15 lines):"; head -n 15 "${DSUB_ENTRYPOINT_SCRIPT_PATH}" | sed 's/^/  /' ; log "   ..."
-
 
 # Define dsub job parameters
 JOB_NAME_PREFIX="aou-runner"
@@ -147,7 +141,8 @@ log "Script for dsub (will run inside container): ${DSUB_ENTRYPOINT_SCRIPT_PATH}
 # The aou_dsub function will set the --logging path.
 
 DSUB_OUTPUT_FILE=$(mktemp "/tmp/aou_dsub_output_XXXXXX.txt")
-trap 'rm -f "${DSUB_ENTRYPOINT_SCRIPT_PATH}" "${DSUB_OUTPUT_FILE}"' EXIT # Update trap for both files
+# Update trap to clean up both temporary files
+trap 'rm -f "${DSUB_ENTRYPOINT_SCRIPT_PATH}" "${DSUB_OUTPUT_FILE}"' EXIT
 
 DSUB_JOB_ID=""
 # The `aou_dsub` function outputs to stdout. We capture it.
@@ -161,7 +156,7 @@ if TEE_DSUB_OUTPUT=$(aou_dsub \
   --min-cores 1 \
   --min-ram 4 \
   2>&1) ; then # Capture stdout and stderr together
-    
+
     echo "${TEE_DSUB_OUTPUT}" > "${DSUB_OUTPUT_FILE}" # Save output for inspection
     log "dsub submission command executed. Full output from dsub call:"
     # Indent the dsub output for clarity in the main log
@@ -169,11 +164,11 @@ if TEE_DSUB_OUTPUT=$(aou_dsub \
 
     # Try to parse the Google Cloud Life Sciences operation ID
     DSUB_JOB_ID=$(echo "${TEE_DSUB_OUTPUT}" | grep -oE "projects/${GOOGLE_PROJECT}/operations/[0-9]+")
-    
+
     if [[ -n "${DSUB_JOB_ID}" ]]; then
         log "SUCCESS: dsub job submitted."
         log "dsub Operation ID (Job ID for dstat): ${DSUB_JOB_ID}"
-        
+
         DSUB_USER_NAME_FOR_DSTAT="$(echo "${OWNER_EMAIL}" | cut -d@ -f1)"
         log "Monitor job status with:"
         log "  dstat --provider google-cls-v2 --project \"${GOOGLE_PROJECT}\" --location us-central1 --users \"${DSUB_USER_NAME_FOR_DSTAT}\" --jobs \"${DSUB_JOB_ID}\" --status '*'"
@@ -183,11 +178,7 @@ if TEE_DSUB_OUTPUT=$(aou_dsub \
         # DSUB_JOB_ID will remain empty, dstat command won't be fully formed
     fi
 else
-    # This block executes if aou_dsub function itself (or dsub command within it) returns a non-zero exit code
-    # which means set -e would have already exited if not for the if condition.
-    # However, if `aou_dsub` returns non-zero before `dsub` is called (e.g. missing env var), this is caught.
-    # If `dsub` itself fails, `set -e` in `aou_dsub` might exit `aou_dsub`, leading here.
-    # The TEE_DSUB_OUTPUT might be empty if `aou_dsub` exited early.
+    # This block executes if aou_dsub function itself (or dsub command within it) returns a non-zero exit code.
     echo "${TEE_DSUB_OUTPUT:-"No output captured, aou_dsub might have failed early."}" > "${DSUB_OUTPUT_FILE}"
     log "ERROR: dsub job submission FAILED."
     log "--- dsub Submission Output/Error Start ---"
