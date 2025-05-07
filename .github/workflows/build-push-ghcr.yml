@@ -11,7 +11,7 @@ on:
 env:
   IMAGE_BASE_NAME: aou-analysis-runner
   DOCKERFILE_PATH: ./Dockerfile
-  GHCR_LOWERCASE_OWNER: sauersml # Ensure this is your lowercase GitHub username/org
+  GHCR_LOWERCASE_OWNER: sauersml # lowercase
 
 jobs:
   build-and-push-multi-arch-to-ghcr:
@@ -51,8 +51,6 @@ jobs:
             type=ref,event=tag
             type=sha,format=short,prefix=
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            # You can add more specific tags if needed, e.g., for ARM64 explicitly
-            # type=raw,value=latest-arm64,enable=${{ github.ref == 'refs/heads/main' }} # Example
 
       - name: Build and Push Docker Image to GHCR (Multi-Arch)
         uses: docker/build-push-action@v5
