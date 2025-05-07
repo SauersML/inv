@@ -4,139 +4,107 @@
 set -euo pipefail
 
 # --- Configuration ---
-REPO_URL="https://github.com/SauersML/inv.git"
-REPO_DIR="inv"
-# The Docker image tag MUST match what's expected in nextflow.config
-# (which constructs it using GOOGLE_PROJECT)
-# Note the specific tag '-py' used in the corrected config for the Python-only image
-IMAGE_NAME="aou-h1h2-assoc-py"
-IMAGE_VERSION="latest"
+GHCR_REGISTRY="ghcr.io"
+# REPO_URL: https://github.com/SauersML/inv.git
+GITHUB_OWNER="SauersML"
+# From env.IMAGE_BASE_NAME in GHA workflow
+IMAGE_BASE_NAME="aou-analysis-runner"
+IMAGE_VERSION="latest" # The GHA workflow pushes 'latest' for the main branch
+
+# Construct the full image path for GHCR
+TARGET_IMAGE="${GHCR_REGISTRY}/${GITHUB_OWNER}/${IMAGE_BASE_NAME}:${IMAGE_VERSION}"
+
+# EXPECTED_SCRIPT_PATH_IN_IMAGE="/app/bin/haplotype_assoc.py" # wrong
+COMMAND_IN_CONTAINER="python3 ${EXPECTED_SCRIPT_PATH_IN_IMAGE} --help"
+COMMAND_IN_CONTAINER="python3 --version"
+
+# Log file configuration
+LOG_DIR="docker_ghcr_test_logs"
+SCRIPT_LOG_FILE="${LOG_DIR}/script_execution_$(date +%Y%m%d_%H%M%S).log"
+DOCKER_LOGIN_LOG_FILE="${LOG_DIR}/docker_login.log"
+DOCKER_PULL_LOG_FILE="${LOG_DIR}/docker_pull.log"
+DOCKER_RUN_LOG_FILE="${LOG_DIR}/docker_run_command.log"
 
 # --- Helper Functions ---
-log() {
-  echo "[$(date +'%Y-%m-%d %H:%M:%S')] $@"
+_log_to_file() {
+  # Ensures log directory exists
+  mkdir -p "${LOG_DIR}"
+  echo "[$(date +'%Y-%m-%d %H:%M:%S')] $@" >> "${SCRIPT_LOG_FILE}"
 }
 
-check_variable() {
-  local var_name="$1"
-  if [[ -z "${!var_name-}" ]]; then # Check if variable is unset or empty
-    log "ERROR: Environment variable ${var_name} is not set."
-    log "Please ensure you are running this script in a properly configured AoU environment."
-    exit 1
-  fi
-  log "INFO: ${var_name}=${!var_name}"
+log() {
+  echo "[$(date +'%Y-%m-%d %H:%M:%S')] $@" | tee -a "${SCRIPT_LOG_FILE}"
 }
 
 # --- Main Script ---
 
-log "Starting AoU H1/H2 Association Pipeline Runner Script"
+# Initialize script log file
+mkdir -p "${LOG_DIR}"
+echo "--- Script Execution Log ---" > "${SCRIPT_LOG_FILE}" # Overwrite/create new log for this run
+_log_to_file "Script started." # Use _log_to_file for initial internal logging
 
-# 1. Check Essential Environment Variables
-log "Step 1: Checking environment variables..."
-check_variable "GOOGLE_PROJECT"
-check_variable "WORKSPACE_CDR"
-check_variable "WORKSPACE_BUCKET"
-log "INFO: Environment variables checked successfully."
+log "--- Starting Docker Image Pull & Run Test from GHCR ---"
+log "INFO: Target Docker Image: ${TARGET_IMAGE}"
+log "INFO: Command to run in container: ${COMMAND_IN_CONTAINER}"
+log "INFO: All detailed logs will be stored in ./${LOG_DIR}/"
 
-# 2. Clone or Update Repository
-log "Step 2: Cloning or updating repository ${REPO_URL}..."
-if [ -d "${REPO_DIR}" ]; then
-  log "INFO: Directory ${REPO_DIR} already exists. Removing for fresh clone."
-  rm -rf "${REPO_DIR}"
-fi
-git clone "${REPO_URL}" "${REPO_DIR}"
-cd "${REPO_DIR}"
-log "INFO: Successfully cloned repository and changed directory to ${REPO_DIR}."
-
-# 3. Enable Required GCP APIs
-log "Step 3: Enabling necessary GCP APIs..."
-# List from README/knowledge of components
-REQUIRED_APIS=(
-  "compute.googleapis.com"
-  "lifesciences.googleapis.com"
-  "containerregistry.googleapis.com"
-  "storage-component.googleapis.com" # GCS API
-  "bigquery.googleapis.com"
-  "dataproc.googleapis.com"
-)
-# Join array elements with commas
-api_list=$(IFS=,; echo "${REQUIRED_APIS[*]}")
-if gcloud services enable "${api_list}" --project="${GOOGLE_PROJECT}"; then
-  log "INFO: Ensured necessary APIs are enabled."
-else
-  log "WARNING: Failed to enable some APIs. This might cause issues later if they weren't already enabled. Check permissions."
-fi
-
-# 4. Build Docker Image
-log "Step 4: Building Docker image..."
-IMAGE_TAG="gcr.io/${GOOGLE_PROJECT}/${IMAGE_NAME}:${IMAGE_VERSION}"
-log "INFO: Building image with tag: ${IMAGE_TAG}"
-# Dockerfile exists
-if [ ! -f Dockerfile ]; then
-    log "ERROR: Dockerfile not found in repository root (${PWD})."
+# Check for Docker
+if ! command -v docker &> /dev/null; then
+    log "ERROR: 'docker' command not found. Please install Docker."
+    _log_to_file "Docker command not found. Exiting."
     exit 1
 fi
-if docker build -t "${IMAGE_TAG}" .; then
-  log "INFO: Docker image built successfully."
+log "INFO: Docker command found: $(command -v docker)"
+log "INFO: Docker version: $(docker --version | tee -a "${SCRIPT_LOG_FILE}")"
+
+# Pull Docker Image from GHCR
+log "[Step 2/3] Pulling Docker image ${TARGET_IMAGE} from GHCR..."
+echo "--- Docker Pull Log for ${TARGET_IMAGE} ---" > "${DOCKER_PULL_LOG_FILE}"
+log "Executing: docker pull \"${TARGET_IMAGE}\""
+if docker pull "${TARGET_IMAGE}" >> "${DOCKER_PULL_LOG_FILE}" 2>&1; then
+    log "SUCCESS: Docker image ${TARGET_IMAGE} pulled successfully."
+    log "Details logged to: ${PWD}/${DOCKER_PULL_LOG_FILE}"
+    _log_to_file "Docker pull successful. Image details from log:"
+    cat "${DOCKER_PULL_LOG_FILE}" >> "${SCRIPT_LOG_FILE}"
+    log "--- Pulled Image Info ---"
+    docker images "${TARGET_IMAGE}" | tee -a "${SCRIPT_LOG_FILE}"
 else
-  log "ERROR: Docker image build failed."
-  exit 1
-fi
-
-# 5. Configure Docker for GCR
-log "Step 5: Configuring Docker authentication for GCR..."
-# Use --quiet to reduce verbose output
-if gcloud auth configure-docker --quiet; then
-  log "INFO: Docker configured for GCR."
-else
-  log "ERROR: Failed to configure Docker for GCR. Check gcloud authentication."
-  exit 1
-fi
-
-# 6. Push Docker Image to GCR
-log "Step 6: Pushing Docker image to GCR..."
-if docker push "${IMAGE_TAG}"; then
-  log "INFO: Docker image pushed successfully to ${IMAGE_TAG}."
-else
-  log "ERROR: Failed to push Docker image. Check GCR permissions for project ${GOOGLE_PROJECT}."
-  exit 1
-fi
-
-# 7. Prepare for Nextflow Run
-log "Step 7: Preparing for Nextflow execution..."
-# Define output directory with a timestamp
-RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-OUTPUT_DIR="${WORKSPACE_BUCKET}/results/aou_h1h2_assoc_${RUN_TIMESTAMP}"
-log "INFO: Pipeline output directory: ${OUTPUT_DIR}"
-# Note: nextflow.config uses environment variables for CDR_ID and implicitly for GOOGLE_PROJECT (in container path).
-# It REQUIRES output_dir_gcs parameter or env var derivation. We will pass it explicitly.
-
-# Check if Nextflow command exists
-if ! command -v nextflow &> /dev/null; then
-    log "ERROR: 'nextflow' command not found. Please install Nextflow."
+    log "ERROR: Failed to pull Docker image ${TARGET_IMAGE}."
+    log "Details in: ${PWD}/${DOCKER_PULL_LOG_FILE}"
+    cat "${DOCKER_PULL_LOG_FILE}" >> "${SCRIPT_LOG_FILE}"
+    _log_to_file "Docker pull failed. Exiting."
     exit 1
 fi
+_log_to_file "Docker pull step completed."
 
-# 8. Execute Nextflow Pipeline
-log "Step 8: Executing Nextflow pipeline..."
-log "INFO: Running command: nextflow run main.nf -profile google --output_dir_gcs \"${OUTPUT_DIR}\" -resume ..."
+# Run Test Command in Docker Image
+log "[Step 3/3] Running test command in the pulled Docker image ${TARGET_IMAGE}..."
+log "Executing: docker run --rm \"${TARGET_IMAGE}\" ${COMMAND_IN_CONTAINER}"
+echo "--- Docker Run Command Log: docker run --rm \"${TARGET_IMAGE}\" ${COMMAND_IN_CONTAINER} ---" > "${DOCKER_RUN_LOG_FILE}"
 
-if nextflow run main.nf \
-    -profile google \
-    --output_dir_gcs "${OUTPUT_DIR}" \
-    -with-report "${OUTPUT_DIR}/reports/nextflow_report.html" \
-    -with-trace "${OUTPUT_DIR}/reports/nextflow_trace.txt" \
-    -with-timeline "${OUTPUT_DIR}/reports/nextflow_timeline.html" \
-    -resume; then
-  log "SUCCESS: Nextflow pipeline completed successfully!"
-  log "INFO: Outputs located in GCS: ${OUTPUT_DIR}"
-  # Display final results path from completion log if possible (tricky from bash script)
+TMP_DOCKER_RUN_OUTPUT_FILE=$(mktemp)
+# Run the command, capturing both stdout and stderr to the temp file and the log file simultaneously
+if docker run --rm "${TARGET_IMAGE}" ${COMMAND_IN_CONTAINER} > "${TMP_DOCKER_RUN_OUTPUT_FILE}" 2>&1; then
+    log "SUCCESS: Command executed successfully in Docker image ${TARGET_IMAGE}."
+    log "--- Command Output Start ---"
+    cat "${TMP_DOCKER_RUN_OUTPUT_FILE}" | tee -a "${DOCKER_RUN_LOG_FILE}" | tee -a "${SCRIPT_LOG_FILE}"
+    log "--- Command Output End ---"
+    log "Full command output logged to: ${PWD}/${DOCKER_RUN_LOG_FILE}"
 else
-  log "ERROR: Nextflow pipeline execution failed."
-  log "INFO: Check the Nextflow logs and the output directory for details: ${OUTPUT_DIR}"
-  # Check Dataproc logs in GCP console if failure seems related to Hail step
-  exit 1 # script exits with non-zero status on failure
+    RUN_EXIT_CODE=$?
+    log "ERROR: Command execution FAILED in Docker image ${TARGET_IMAGE} (Exit Code: ${RUN_EXIT_CODE})."
+    log "--- Command Output/Error Start ---"
+    cat "${TMP_DOCKER_RUN_OUTPUT_FILE}" | tee -a "${DOCKER_RUN_LOG_FILE}" | tee -a "${SCRIPT_LOG_FILE}"
+    log "--- Command Output/Error End ---"
+    log "Full command output/error logged to: ${PWD}/${DOCKER_RUN_LOG_FILE}"
+    _log_to_file "Docker run command failed. Exiting."
+    rm -f "${TMP_DOCKER_RUN_OUTPUT_FILE}"
+    exit 1
 fi
+rm -f "${TMP_DOCKER_RUN_OUTPUT_FILE}"
+_log_to_file "Docker run step completed."
 
-log "Pipeline Runner Script Finished."
+log "--- Docker Image Pull & Run Test from GHCR Finished Successfully ---"
+log "All logs collected in directory: ${PWD}/${LOG_DIR}"
+_log_to_file "Script finished successfully."
 exit 0
