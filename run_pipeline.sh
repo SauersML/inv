@@ -5,106 +5,198 @@ set -euo pipefail
 
 # --- Configuration ---
 GHCR_REGISTRY="ghcr.io"
-# REPO_URL: https://github.com/SauersML/inv.git
 GITHUB_OWNER="SauersML"
-# From env.IMAGE_BASE_NAME in GHA workflow
-IMAGE_BASE_NAME="aou-analysis-runner"
-IMAGE_VERSION="latest" # The GHA workflow pushes 'latest' for the main branch
+IMAGE_BASE_NAME="aou-analysis-runner" # From env.IMAGE_BASE_NAME in GHA workflow
+IMAGE_VERSION="latest"                # The GHA workflow pushes 'latest' for the main branch
 
-# Construct the full image path for GHCR
 TARGET_IMAGE="${GHCR_REGISTRY}/${GITHUB_OWNER}/${IMAGE_BASE_NAME}:${IMAGE_VERSION}"
 
-# EXPECTED_SCRIPT_PATH_IN_IMAGE="/app/bin/haplotype_assoc.py" # wrong
-# COMMAND_IN_CONTAINER="python3 ${EXPECTED_SCRIPT_PATH_IN_IMAGE} --help"
-COMMAND_IN_CONTAINER="python3 --version"
-
-# Log file configuration
-LOG_DIR="docker_ghcr_test_logs"
-SCRIPT_LOG_FILE="${LOG_DIR}/script_execution_$(date +%Y%m%d_%H%M%S).log"
-DOCKER_LOGIN_LOG_FILE="${LOG_DIR}/docker_login.log"
-DOCKER_PULL_LOG_FILE="${LOG_DIR}/docker_pull.log"
-DOCKER_RUN_LOG_FILE="${LOG_DIR}/docker_run_command.log"
+# Command(s) to run inside the Docker container.
+# This can be overridden by setting the AOC_COMMAND_IN_CONTAINER environment variable
+# before running this script.
+# Example: export AOC_COMMAND_IN_CONTAINER="nextflow run hello -profile test,docker"
+AOC_DEFAULT_COMMAND="echo '--- Running inside Docker container ---'; \
+echo 'Date: $(date)'; \
+echo 'User: $(whoami)'; \
+echo 'Hostname: $(hostname)'; \
+echo 'Current Directory: $(pwd)'; \
+echo 'Python version:'; python3 --version; \
+echo 'Nextflow version:'; nextflow -version || echo 'Nextflow not found or error getting version.'; \
+echo '--- Docker container script finished ---'"
+COMMAND_TO_RUN_IN_CONTAINER="${AOC_COMMAND_IN_CONTAINER:-$AOC_DEFAULT_COMMAND}"
 
 # --- Helper Functions ---
-_log_to_file() {
-  # Ensures log directory exists
-  mkdir -p "${LOG_DIR}"
-  echo "[$(date +'%Y-%m-%d %H:%M:%S')] $@" >> "${SCRIPT_LOG_FILE}"
+log() {
+  echo >&2 "[$(date +'%Y-%m-%d %H:%M:%S')] [AoU Pipeline Runner] $@"
 }
 
-log() {
-  echo "[$(date +'%Y-%m-%d %H:%M:%S')] $@" | tee -a "${SCRIPT_LOG_FILE}"
+# --- dsub Helper Function (adapted for AoU environment) ---
+# This function is based on common AoU patterns (e.g., PGS Catalog examples)
+# It defines how 'dsub' is called with AoU-specific parameters.
+aou_dsub () {
+  if [[ -z "${OWNER_EMAIL:-}" || -z "${GOOGLE_PROJECT:-}" || -z "${WORKSPACE_BUCKET:-}" ]]; then
+    log "ERROR: OWNER_EMAIL, GOOGLE_PROJECT, and WORKSPACE_BUCKET environment variables must be set to use aou_dsub."
+    return 1
+  fi
+
+  local DSUB_USER_NAME
+  DSUB_USER_NAME="$(echo "${OWNER_EMAIL}" | cut -d@ -f1)" # Consistent with AoU examples
+
+  # For AoU RWB projects network name is "network".
+  local AOU_NETWORK="network"
+  local AOU_SUBNETWORK="subnetwork"
+
+  if ! command -v dsub &> /dev/null; then
+    log "ERROR: 'dsub' command not found. Please ensure it's installed and in your PATH."
+    log "In the All of Us Researcher Workbench terminal, dsub should be available."
+    return 1
+  fi
+  
+  local service_account
+  service_account=$(gcloud config get-value account 2>/dev/null)
+  if [[ -z "$service_account" ]]; then
+    log "WARNING: Could not retrieve account from gcloud config. Using OWNER_EMAIL as fallback for service account."
+    service_account="${OWNER_EMAIL}"
+  fi
+
+  log "Submitting dsub job with user: ${DSUB_USER_NAME}, project: ${GOOGLE_PROJECT}, service-account: ${service_account}"
+  
+  # The --logging path is critical. It uses dsub placeholders.
+  # {job-name}, {user-id}, {job-id} will be filled by dsub.
+  # The date part in the log path is when dsub processes the job, not when this script runs.
+  dsub \
+      --provider google-cls-v2 \
+      --user-project "${GOOGLE_PROJECT}" \
+      --project "${GOOGLE_PROJECT}" \
+      --network "${AOU_NETWORK}" \
+      --subnetwork "${AOU_SUBNETWORK}" \
+      --service-account "${service_account}" \
+      --user "${DSUB_USER_NAME}" \
+      --regions us-central1 \
+      --logging "${WORKSPACE_BUCKET}/dsub/logs/{job-name}/${DSUB_USER_NAME}/$(date +'%Y%m%d')/{job-id}.log" \
+      "$@" # Pass through all other arguments (like --image, --script, --name etc.)
 }
 
 # --- Main Script ---
+log "--- Starting All of Us Docker Container Submission Script ---"
+log "Target Docker Image: ${TARGET_IMAGE}"
+log "Command to run in container will be written to a temporary script."
+log "To customize the command, set AOC_COMMAND_IN_CONTAINER environment variable."
 
-# Initialize script log file
-mkdir -p "${LOG_DIR}"
-echo "--- Script Execution Log ---" > "${SCRIPT_LOG_FILE}" # Overwrite/create new log for this run
-_log_to_file "Script started." # Use _log_to_file for initial internal logging
-
-log "--- Starting Docker Image Pull & Run Test from GHCR ---"
-log "INFO: Target Docker Image: ${TARGET_IMAGE}"
-log "INFO: Command to run in container: ${COMMAND_IN_CONTAINER}"
-log "INFO: All detailed logs will be stored in ./${LOG_DIR}/"
-
-# Check for Docker
-if ! command -v docker &> /dev/null; then
-    log "ERROR: 'docker' command not found. Please install Docker."
-    _log_to_file "Docker command not found. Exiting."
-    exit 1
+# Check for required AoU environment variables
+log "Checking for required environment variables..."
+if [[ -z "${WORKSPACE_BUCKET:-}" ]]; then
+  log "ERROR: WORKSPACE_BUCKET environment variable is not set."
+  log "This is required for dsub logging and potential output in the AoU environment."
+  exit 1
 fi
-log "INFO: Docker command found: $(command -v docker)"
-log "INFO: Docker version: $(docker --version | tee -a "${SCRIPT_LOG_FILE}")"
+log "INFO: WORKSPACE_BUCKET: ${WORKSPACE_BUCKET}"
 
-# Pull Docker Image from GHCR
-log "[Step 2/3] Pulling Docker image ${TARGET_IMAGE} from GHCR..."
-echo "--- Docker Pull Log for ${TARGET_IMAGE} ---" > "${DOCKER_PULL_LOG_FILE}"
-log "Executing: docker pull \"${TARGET_IMAGE}\""
-if docker pull "${TARGET_IMAGE}" >> "${DOCKER_PULL_LOG_FILE}" 2>&1; then
-    log "SUCCESS: Docker image ${TARGET_IMAGE} pulled successfully."
-    log "Details logged to: ${PWD}/${DOCKER_PULL_LOG_FILE}"
-    _log_to_file "Docker pull successful. Image details from log:"
-    cat "${DOCKER_PULL_LOG_FILE}" >> "${SCRIPT_LOG_FILE}"
-    log "--- Pulled Image Info ---"
-    docker images "${TARGET_IMAGE}" | tee -a "${SCRIPT_LOG_FILE}"
+if [[ -z "${OWNER_EMAIL:-}" ]]; then
+  log "ERROR: OWNER_EMAIL environment variable is not set."
+  exit 1
+fi
+log "INFO: OWNER_EMAIL: ${OWNER_EMAIL}"
+
+if [[ -z "${GOOGLE_PROJECT:-}" ]]; then
+  log "ERROR: GOOGLE_PROJECT environment variable is not set."
+  exit 1
+fi
+log "INFO: GOOGLE_PROJECT: ${GOOGLE_PROJECT}"
+
+
+# Create a temporary script that dsub will execute inside the container
+# Suffix with .sh for clarity, though not strictly necessary for dsub
+DSUB_ENTRYPOINT_SCRIPT_PATH=$(mktemp "/tmp/aou_dsub_entrypoint_XXXXXX.sh")
+# Ensure cleanup of the temporary script on exit (normal or error)
+trap 'rm -f "${DSUB_ENTRYPOINT_SCRIPT_PATH}"' EXIT
+
+log "Creating temporary dsub entrypoint script at: ${DSUB_ENTRYPOINT_SCRIPT_PATH}"
+cat << EOF > "${DSUB_ENTRYPOINT_SCRIPT_PATH}"
+#!/bin/bash
+set -euo pipefail # Ensure strict mode inside the container script as well
+
+echo "--- dsub entrypoint script started at \$(date) on \$(hostname) ---"
+echo "Working directory: \$(pwd)"
+echo "User: \$(whoami)"
+
+# Add any environment setup needed within the container *before* the main command
+# For example: export SOME_VARIABLE="some_value"
+# The PATH should already include /opt/venv/bin from your Dockerfile.
+
+# Execute the user-defined command
+${COMMAND_TO_RUN_IN_CONTAINER}
+
+echo "--- dsub entrypoint script finished at \$(date) ---"
+EOF
+chmod +x "${DSUB_ENTRYPOINT_SCRIPT_PATH}"
+log "Temporary dsub entrypoint script created successfully."
+# For debugging, you can uncomment the next line to see the script content (first few lines)
+# log "Entrypoint script content (first 15 lines):"; head -n 15 "${DSUB_ENTRYPOINT_SCRIPT_PATH}" | sed 's/^/  /' ; log "   ..."
+
+
+# Define dsub job parameters
+JOB_NAME_PREFIX="aou-runner"
+RANDOM_SUFFIX=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 6)
+JOB_NAME="${JOB_NAME_PREFIX}-$(date +%Y%m%d-%H%M%S)-${RANDOM_SUFFIX}"
+
+log "Attempting to submit job to dsub..."
+log "Job Name for dsub: ${JOB_NAME}"
+log "Image for dsub: ${TARGET_IMAGE}"
+log "Script for dsub (will run inside container): ${DSUB_ENTRYPOINT_SCRIPT_PATH}"
+# The aou_dsub function will set the --logging path.
+
+DSUB_OUTPUT_FILE=$(mktemp "/tmp/aou_dsub_output_XXXXXX.txt")
+trap 'rm -f "${DSUB_ENTRYPOINT_SCRIPT_PATH}" "${DSUB_OUTPUT_FILE}"' EXIT # Update trap for both files
+
+DSUB_JOB_ID=""
+# The `aou_dsub` function outputs to stdout. We capture it.
+# Stderr is also redirected to stdout to be captured by TEE_DSUB_OUTPUT.
+if TEE_DSUB_OUTPUT=$(aou_dsub \
+  --name "${JOB_NAME}" \
+  --image "${TARGET_IMAGE}" \
+  --script "${DSUB_ENTRYPOINT_SCRIPT_PATH}" \
+  --boot-disk-size 50 \
+  --disk-size 50 \
+  --min-cores 1 \
+  --min-ram 4 \
+  2>&1) ; then # Capture stdout and stderr together
+    
+    echo "${TEE_DSUB_OUTPUT}" > "${DSUB_OUTPUT_FILE}" # Save output for inspection
+    log "dsub submission command executed. Full output from dsub call:"
+    # Indent the dsub output for clarity in the main log
+    while IFS= read -r line; do log "  ${line}"; done < "${DSUB_OUTPUT_FILE}"
+
+    # Try to parse the Google Cloud Life Sciences operation ID
+    DSUB_JOB_ID=$(echo "${TEE_DSUB_OUTPUT}" | grep -oE "projects/${GOOGLE_PROJECT}/operations/[0-9]+")
+    
+    if [[ -n "${DSUB_JOB_ID}" ]]; then
+        log "SUCCESS: dsub job submitted."
+        log "dsub Operation ID (Job ID for dstat): ${DSUB_JOB_ID}"
+        
+        DSUB_USER_NAME_FOR_DSTAT="$(echo "${OWNER_EMAIL}" | cut -d@ -f1)"
+        log "Monitor job status with:"
+        log "  dstat --provider google-cls-v2 --project \"${GOOGLE_PROJECT}\" --location us-central1 --users \"${DSUB_USER_NAME_FOR_DSTAT}\" --jobs \"${DSUB_JOB_ID}\" --status '*'"
+    else
+        log "ERROR: dsub job submitted, but could not parse Operation ID from dsub output."
+        log "Please check the dsub output above manually."
+        # DSUB_JOB_ID will remain empty, dstat command won't be fully formed
+    fi
 else
-    log "ERROR: Failed to pull Docker image ${TARGET_IMAGE}."
-    log "Details in: ${PWD}/${DOCKER_PULL_LOG_FILE}"
-    cat "${DOCKER_PULL_LOG_FILE}" >> "${SCRIPT_LOG_FILE}"
-    _log_to_file "Docker pull failed. Exiting."
+    # This block executes if aou_dsub function itself (or dsub command within it) returns a non-zero exit code
+    # which means set -e would have already exited if not for the if condition.
+    # However, if `aou_dsub` returns non-zero before `dsub` is called (e.g. missing env var), this is caught.
+    # If `dsub` itself fails, `set -e` in `aou_dsub` might exit `aou_dsub`, leading here.
+    # The TEE_DSUB_OUTPUT might be empty if `aou_dsub` exited early.
+    echo "${TEE_DSUB_OUTPUT:-"No output captured, aou_dsub might have failed early."}" > "${DSUB_OUTPUT_FILE}"
+    log "ERROR: dsub job submission FAILED."
+    log "--- dsub Submission Output/Error Start ---"
+    cat "${DSUB_OUTPUT_FILE}"
+    log "--- dsub Submission Output/Error End ---"
+    # Trap will clean up.
     exit 1
 fi
-_log_to_file "Docker pull step completed."
 
-# Run Test Command in Docker Image
-log "[Step 3/3] Running test command in the pulled Docker image ${TARGET_IMAGE}..."
-log "Executing: docker run --rm \"${TARGET_IMAGE}\" ${COMMAND_IN_CONTAINER}"
-echo "--- Docker Run Command Log: docker run --rm \"${TARGET_IMAGE}\" ${COMMAND_IN_CONTAINER} ---" > "${DOCKER_RUN_LOG_FILE}"
-
-TMP_DOCKER_RUN_OUTPUT_FILE=$(mktemp)
-# Run the command, capturing both stdout and stderr to the temp file and the log file simultaneously
-if docker run --rm "${TARGET_IMAGE}" ${COMMAND_IN_CONTAINER} > "${TMP_DOCKER_RUN_OUTPUT_FILE}" 2>&1; then
-    log "SUCCESS: Command executed successfully in Docker image ${TARGET_IMAGE}."
-    log "--- Command Output Start ---"
-    cat "${TMP_DOCKER_RUN_OUTPUT_FILE}" | tee -a "${DOCKER_RUN_LOG_FILE}" | tee -a "${SCRIPT_LOG_FILE}"
-    log "--- Command Output End ---"
-    log "Full command output logged to: ${PWD}/${DOCKER_RUN_LOG_FILE}"
-else
-    RUN_EXIT_CODE=$?
-    log "ERROR: Command execution FAILED in Docker image ${TARGET_IMAGE} (Exit Code: ${RUN_EXIT_CODE})."
-    log "--- Command Output/Error Start ---"
-    cat "${TMP_DOCKER_RUN_OUTPUT_FILE}" | tee -a "${DOCKER_RUN_LOG_FILE}" | tee -a "${SCRIPT_LOG_FILE}"
-    log "--- Command Output/Error End ---"
-    log "Full command output/error logged to: ${PWD}/${DOCKER_RUN_LOG_FILE}"
-    _log_to_file "Docker run command failed. Exiting."
-    rm -f "${TMP_DOCKER_RUN_OUTPUT_FILE}"
-    exit 1
-fi
-rm -f "${TMP_DOCKER_RUN_OUTPUT_FILE}"
-_log_to_file "Docker run step completed."
-
-log "--- Docker Image Pull & Run Test from GHCR Finished Successfully ---"
-log "All logs collected in directory: ${PWD}/${LOG_DIR}"
-_log_to_file "Script finished successfully."
+# Trap will clean up temporary files.
+log "--- All of Us Docker Container Submission Script Finished ---"
 exit 0
