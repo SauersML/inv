@@ -15,7 +15,7 @@ IMAGE_VERSION="latest" # The GHA workflow pushes 'latest' for the main branch
 TARGET_IMAGE="${GHCR_REGISTRY}/${GITHUB_OWNER}/${IMAGE_BASE_NAME}:${IMAGE_VERSION}"
 
 # EXPECTED_SCRIPT_PATH_IN_IMAGE="/app/bin/haplotype_assoc.py" # wrong
-COMMAND_IN_CONTAINER="python3 ${EXPECTED_SCRIPT_PATH_IN_IMAGE} --help"
+# COMMAND_IN_CONTAINER="python3 ${EXPECTED_SCRIPT_PATH_IN_IMAGE} --help"
 COMMAND_IN_CONTAINER="python3 --version"
 
 # Log file configuration
