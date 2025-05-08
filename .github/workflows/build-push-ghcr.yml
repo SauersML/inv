@@ -1,4 +1,4 @@
-name: Build and Push Multi-Arch Docker Image to Public GHCR
+name: Build and Push Multi-Arch Docker Image to GHCR and Docker Hub
 
 on:
   push:
@@ -9,25 +9,30 @@ on:
   workflow_dispatch: # Allows manual triggering
 
 env:
+  # GHCR path structure
   IMAGE_BASE_NAME: aou-analysis-runner
+  # Define the path to the Dockerfile.
   DOCKERFILE_PATH: ./Dockerfile
-  GHCR_LOWERCASE_OWNER: sauersml # lowercase
+  # Lowercase GitHub username/org for GHCR path
+  GHCR_LOWERCASE_OWNER: sauersml
+  # Specify the repository name created on Docker Hub
+  DOCKERHUB_REPO_NAME: runner
 
 jobs:
-  build-and-push-multi-arch-to-ghcr:
-    name: Build Docker (Multi-Arch) and Push to GHCR
+  build-and-push-multi-arch: # Updated job name
+    name: Build Docker (Multi-Arch) and Push to Registries
     runs-on: ubuntu-latest # This runner is amd64
 
     permissions:
       contents: 'read'
-      packages: 'write'
+      packages: 'write' # Needed for GHCR push
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Set up QEMU
-        # QEMU is used for cross-platform builds (e.g., building arm64 on an amd64 runner)
+        # QEMU is used for cross-platform builds
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
@@ -41,26 +46,39 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Docker Meta (Generate Image Tags and Labels)
-        id: meta
+        id: meta # Assign an ID to refer to the outputs of this step later
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ env.GHCR_LOWERCASE_OWNER }}/${{ env.IMAGE_BASE_NAME }}
+          # Tags will apply to both.
+          # Docker Hub path is user/repo, GHCR path is ghcr.io/user/repo
+          images: |
+            ghcr.io/${{ env.GHCR_LOWERCASE_OWNER }}/${{ env.IMAGE_BASE_NAME }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKERHUB_REPO_NAME }}
+          # Define tagging strategy:
           tags: |
             type=ref,event=branch
             type=ref,event=tag
             type=sha,format=short,prefix=
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
-      - name: Build and Push Docker Image to GHCR (Multi-Arch)
+      - name: Build and Push Docker Image (Multi-Arch)
+        # This action builds once and pushes to all registries/repos defined in meta.images
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ${{ env.DOCKERFILE_PATH }}
           # Specify the platforms to build for
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: true # Push to registries
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Enable build caching to speed up subsequent builds on the same runner
           cache-from: type=gha
           cache-to: type=gha,mode=max
