@@ -173,7 +173,15 @@ if { aou_dsub \
         log "dsub Job ID: ${LAUNCHED_DSUB_JOB_ID}"
         log "Monitor job status with:"
         # Provide the exact dstat command using the extracted dsub job ID
-        log "  dstat --provider google-cls-v2 --project \"${GOOGLE_PROJECT}\" --location us-central1 --users \"${DSUB_USER_NAME}\" --jobs '${LAUNCHED_DSUB_JOB_ID}' --status '*' --full"
+        # Recalculate the user name needed for the dstat command (local in aou_dsub)
+        # Requires OWNER_EMAIL to be correctly set in the environment
+        local DSUB_USER_NAME_FOR_DSTAT
+        if [[ -n "${OWNER_EMAIL:-}" ]]; then
+           DSUB_USER_NAME_FOR_DSTAT="$(echo "${OWNER_EMAIL}" | cut -d@ -f1)"
+        else
+           DSUB_USER_NAME_FOR_DSTAT="<UNKNOWN_USER>" # Fallback if OWNER_EMAIL somehow unset
+        fi
+        log "  dstat --provider google-cls-v2 --project \"${GOOGLE_PROJECT}\" --location us-central1 --users \"${DSUB_USER_NAME_FOR_DSTAT}\" --jobs '${LAUNCHED_DSUB_JOB_ID}' --status '*' --full"
     else
         log "ERROR: dsub job submitted, but could not parse dsub Job ID from output."
     fi
