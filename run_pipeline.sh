@@ -4,12 +4,7 @@
 set -euo pipefail
 
 # --- Configuration ---
-GHCR_REGISTRY="ghcr.io"
-GITHUB_OWNER="sauersml" # lowercase for Docker image path compatibility
-IMAGE_BASE_NAME="aou-analysis-runner"
-IMAGE_VERSION="latest"
-
-TARGET_IMAGE="${GHCR_REGISTRY}/${GITHUB_OWNER}/${IMAGE_BASE_NAME}:${IMAGE_VERSION}"
+TARGET_IMAGE="sauers/runner:latest" # Using Docker Hub image 'sauers/runner' with tag 'latest'
 
 # Command(s) to run inside the Docker container.
 # This can be overridden by setting the AOC_COMMAND_IN_CONTAINER environment variable
@@ -59,7 +54,6 @@ aou_dsub () {
 
   log "Submitting dsub job with user: ${DSUB_USER_NAME}, project: ${GOOGLE_PROJECT}, service-account: ${service_account}"
 
-  # The --logging path is critical. It uses dsub placeholders.
   # {job-name}, {user-id}, {job-id} will be filled by dsub.
   # The date part in the log path is when dsub processes the job, not when this script runs.
   dsub \
@@ -77,7 +71,7 @@ aou_dsub () {
 
 # --- Main Script ---
 log "--- Starting All of Us Docker Container Submission Script ---"
-log "Target Docker Image: ${TARGET_IMAGE}"
+log "Target Docker Image: ${TARGET_IMAGE}" # This will now log "sauers/runner:latest"
 log "Command to run in container will be written to a temporary script."
 log "To customize the command, set AOC_COMMAND_IN_CONTAINER environment variable."
 
@@ -106,7 +100,7 @@ log "INFO: GOOGLE_PROJECT: ${GOOGLE_PROJECT}"
 # Create a temporary script that dsub will execute inside the container
 # Suffix with .sh for clarity, though not strictly necessary for dsub
 DSUB_ENTRYPOINT_SCRIPT_PATH=$(mktemp "/tmp/aou_dsub_entrypoint_XXXXXX.sh")
-# Ensure cleanup of the temporary script on exit (normal or error)
+# Cleanup of the temporary script on exit (normal or error)
 trap 'rm -f "${DSUB_ENTRYPOINT_SCRIPT_PATH}"' EXIT
 
 log "Creating temporary dsub entrypoint script at: ${DSUB_ENTRYPOINT_SCRIPT_PATH}"
@@ -118,8 +112,8 @@ echo "--- dsub entrypoint script started at \$(date) on \$(hostname) ---"
 echo "Working directory: \$(pwd)"
 echo "User: \$(whoami)"
 
-# Add any environment setup needed within the container *before* the main command
-# The PATH should already include /opt/venv/bin from your Dockerfile.
+# Add any environment setup needed within the container beforethe main command
+# The PATH should already include /opt/venv/bin from Dockerfile.
 
 # Execute the user-defined command
 ${COMMAND_TO_RUN_IN_CONTAINER}
@@ -136,7 +130,7 @@ JOB_NAME="${JOB_NAME_PREFIX}-$(date +%Y%m%d-%H%M%S)-${RANDOM_SUFFIX}"
 
 log "Attempting to submit job to dsub..."
 log "Job Name for dsub: ${JOB_NAME}"
-log "Image for dsub: ${TARGET_IMAGE}"
+log "Image for dsub: ${TARGET_IMAGE}" # Will use the Docker Hub image path
 log "Script for dsub (will run inside container): ${DSUB_ENTRYPOINT_SCRIPT_PATH}"
 # The aou_dsub function will set the --logging path.
 
@@ -144,48 +138,59 @@ DSUB_OUTPUT_FILE=$(mktemp "/tmp/aou_dsub_output_XXXXXX.txt")
 # Update trap to clean up both temporary files
 trap 'rm -f "${DSUB_ENTRYPOINT_SCRIPT_PATH}" "${DSUB_OUTPUT_FILE}"' EXIT
 
-DSUB_JOB_ID=""
-# The `aou_dsub` function outputs to stdout. We capture it.
-# Stderr is also redirected to stdout to be captured by TEE_DSUB_OUTPUT.
-if TEE_DSUB_OUTPUT=$(aou_dsub \
-  --name "${JOB_NAME}" \
-  --image "${TARGET_IMAGE}" \
-  --script "${DSUB_ENTRYPOINT_SCRIPT_PATH}" \
-  --boot-disk-size 50 \
-  --disk-size 50 \
-  --min-cores 1 \
-  --min-ram 4 \
-  2>&1) ; then # Capture stdout and stderr together
+# Define variable to store the launched dsub job ID
+LAUNCHED_DSUB_JOB_ID=""
 
-    echo "${TEE_DSUB_OUTPUT}" > "${DSUB_OUTPUT_FILE}" # Save output for inspection
-    log "dsub submission command executed. Full output from dsub call:"
+# Redirect stderr to stdout when calling aou_dsub to capture all output
+# Note the change here: using process substitution and reading line by line
+# This avoids issues with stderr/stdout capture in simple command substitution
+# And allows extracting the ID while still logging the full output.
+if { aou_dsub \
+      --name "${JOB_NAME}" \
+      --image "${TARGET_IMAGE}" \
+      --script "${DSUB_ENTRYPOINT_SCRIPT_PATH}" \
+      --boot-disk-size 50 \
+      --disk-size 50 \
+      --min-cores 1 \
+      --min-ram 4 \
+      2>&1 | tee "${DSUB_OUTPUT_FILE}"; \
+      # Check exit status of dsub call (inside the command group)
+      # Access pipestatus if using bash, otherwise rely on tee exit status (0 if successful)
+      EXIT_STATUS=${PIPESTATUS[0]}; \
+      (( EXIT_STATUS == 0 )); \
+    }; then
+
+    log "dsub submission command executed successfully (Exit Status: ${EXIT_STATUS}). Full output from dsub call:"
     # Indent the dsub output for clarity in the main log
     while IFS= read -r line; do log "  ${line}"; done < "${DSUB_OUTPUT_FILE}"
 
-    # Try to parse the Google Cloud Life Sciences operation ID
-    DSUB_JOB_ID=$(echo "${TEE_DSUB_OUTPUT}" | grep -oE "projects/${GOOGLE_PROJECT}/operations/[0-9]+")
+    # Try to parse the dsub job ID (not the GCLS operation ID)
+    # Looking for the line like: Launched job-id: aou-runner--scottsauers--...
+    LAUNCHED_DSUB_JOB_ID=$(grep 'Launched job-id:' "${DSUB_OUTPUT_FILE}" | awk '{print $NF}')
 
-    if [[ -n "${DSUB_JOB_ID}" ]]; then
+    if [[ -n "${LAUNCHED_DSUB_JOB_ID}" ]]; then
         log "SUCCESS: dsub job submitted."
-        log "dsub Operation ID (Job ID for dstat): ${DSUB_JOB_ID}"
-
-        DSUB_USER_NAME_FOR_DSTAT="$(echo "${OWNER_EMAIL}" | cut -d@ -f1)"
+        log "dsub Job ID: ${LAUNCHED_DSUB_JOB_ID}"
         log "Monitor job status with:"
-        log "  dstat --provider google-cls-v2 --project \"${GOOGLE_PROJECT}\" --location us-central1 --users \"${DSUB_USER_NAME_FOR_DSTAT}\" --jobs \"${DSUB_JOB_ID}\" --status '*'"
+        # Provide the exact dstat command using the extracted dsub job ID
+        log "  dstat --provider google-cls-v2 --project \"${GOOGLE_PROJECT}\" --location us-central1 --users \"${DSUB_USER_NAME}\" --jobs '${LAUNCHED_DSUB_JOB_ID}' --status '*' --full"
     else
-        log "ERROR: dsub job submitted, but could not parse Operation ID from dsub output."
-        log "Please check the dsub output above manually."
-        # DSUB_JOB_ID will remain empty, dstat command won't be fully formed
+        log "ERROR: dsub job submitted, but could not parse dsub Job ID from output."
     fi
 else
-    # This block executes if aou_dsub function itself (or dsub command within it) returns a non-zero exit code.
-    echo "${TEE_DSUB_OUTPUT:-"No output captured, aou_dsub might have failed early."}" > "${DSUB_OUTPUT_FILE}"
-    log "ERROR: dsub job submission FAILED."
+    # This block executes if aou_dsub function itself or the dsub command failed
+    EXIT_STATUS=$? # Capture actual exit status
+    log "ERROR: dsub job submission FAILED (Exit Status: ${EXIT_STATUS})."
     log "--- dsub Submission Output/Error Start ---"
-    cat "${DSUB_OUTPUT_FILE}"
+    # Ensure output file exists before catting, though tee should create it
+    if [[ -f "${DSUB_OUTPUT_FILE}" ]]; then
+      cat "${DSUB_OUTPUT_FILE}"
+    else
+      log "No output captured in ${DSUB_OUTPUT_FILE}"
+    fi
     log "--- dsub Submission Output/Error End ---"
     # Trap will clean up.
-    exit 1
+    exit 1 # Exit with non-zero status
 fi
 
 # Trap will clean up temporary files.
