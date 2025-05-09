@@ -4,30 +4,18 @@
 set -euo pipefail
 
 # --- Configuration ---
-# Target Docker image
+# Target Docker image (contains Nextflow, tools, and pipeline scripts)
 readonly TARGET_IMAGE="sauers/runner:latest"
 
-# Paths to Nextflow components inside the container
+# Paths to Nextflow components inside the Docker container
 readonly NEXTFLOW_SCRIPT_PATH_IN_IMAGE="/opt/analysis_workspace/main.nf"
 readonly NEXTFLOW_CONFIG_PATH_IN_IMAGE="/opt/analysis_workspace/nextflow.config"
 
 # Working directory for Nextflow inside the container
-# dsub typically provides /mnt/data/workingdir
 readonly NEXTFLOW_WORK_DIR_IN_CONTAINER="/mnt/data/workingdir/nf_work"
 
-# --- Define the single command to run inside the container ---
-# This launches the Nextflow pipeline.
-# Nextflow reads all parameters (GCS paths, region, output dir) from its config file.
-readonly COMMAND_TO_RUN_IN_CONTAINER="
-echo '[INFO] Launching Nextflow pipeline...'
-nextflow run ${NEXTFLOW_SCRIPT_PATH_IN_IMAGE} \\
-    -c ${NEXTFLOW_CONFIG_PATH_IN_IMAGE} \\
-    -profile standard \\
-    -work-dir \"${NEXTFLOW_WORK_DIR_IN_CONTAINER}\" \\
-    -with-docker \"${TARGET_IMAGE}\" \\
-    -resume
-exit \$? # Exit dsub script with Nextflow's exit code
-"
+# Environment variable NAME that dsub will set for the Nextflow output directory path
+readonly DSUB_NEXTFLOW_OUTPUT_DIR_ENV_VAR="NF_RESULTS_DIR"
 
 # --- Helper Function: Minimal Logging ---
 log_submitter() {
@@ -47,51 +35,90 @@ log_submitter "INFO: Using Project=${GOOGLE_PROJECT}, Bucket=${WORKSPACE_BUCKET}
 DSUB_ENTRYPOINT_SCRIPT_PATH=$(mktemp "/tmp/dsub_nf_entrypoint_XXXXXX.sh")
 trap 'rm -f "${DSUB_ENTRYPOINT_SCRIPT_PATH}"' EXIT # Cleanup on exit
 log_submitter "INFO: Creating dsub entrypoint script: ${DSUB_ENTRYPOINT_SCRIPT_PATH}"
+
+# Construct the content of the entrypoint script
+# This script will run inside the dsub-launched container
 cat << EOF > "${DSUB_ENTRYPOINT_SCRIPT_PATH}"
 #!/bin/bash
 set -euo pipefail
-echo "--- dsub entrypoint started: \$(date) on \$(hostname) ---"
-pwd
-whoami
-${COMMAND_TO_RUN_IN_CONTAINER}
-echo "--- dsub entrypoint finished: \$(date) ---"
+
+echo "--- dsub entrypoint script started: \$(date) on \$(hostname) ---"
+echo "--- Working directory: \$(pwd) ---"
+echo "--- User: \$(whoami) ---"
+
+# The DSUB_NEXTFLOW_OUTPUT_DIR_ENV_VAR ('${DSUB_NEXTFLOW_OUTPUT_DIR_ENV_VAR}')
+# will be set by dsub to the actual local path for outputs.
+# Example: /mnt/data/outputs/${DSUB_NEXTFLOW_OUTPUT_DIR_ENV_VAR}/
+LOCAL_NF_OUTPUT_PATH="\${${DSUB_NEXTFLOW_OUTPUT_DIR_ENV_VAR}}"
+
+echo "[ENTRYPOINT] Nextflow output directory (from env var \$${DSUB_NEXTFLOW_OUTPUT_DIR_ENV_VAR}): \"\${LOCAL_NF_OUTPUT_PATH}\""
+
+# Ensure the output directory dsub provides exists
+if [[ -z "\${LOCAL_NF_OUTPUT_PATH}" ]]; then
+    echo "[ENTRYPOINT] ERROR: Output directory env var \$${DSUB_NEXTFLOW_OUTPUT_DIR_ENV_VAR} not set by dsub!"
+    exit 1
+fi
+mkdir -p "\${LOCAL_NF_OUTPUT_PATH}"
+echo "[ENTRYPOINT] Ensured local Nextflow output directory exists: \${LOCAL_NF_OUTPUT_PATH}"
+
+echo "[ENTRYPOINT] Launching Nextflow pipeline..."
+nextflow run "${NEXTFLOW_SCRIPT_PATH_IN_IMAGE}" \\
+    -c "${NEXTFLOW_CONFIG_PATH_IN_IMAGE}" \\
+    --output_dir_local "\${LOCAL_NF_OUTPUT_PATH}" \\
+    -profile standard \\
+    -work-dir "${NEXTFLOW_WORK_DIR_IN_CONTAINER}" \\
+    -with-docker "${TARGET_IMAGE}" \\
+    -resume
+
+NEXTFLOW_EXIT_CODE=\$?
+echo "[ENTRYPOINT] Nextflow execution finished with exit code: \${NEXTFLOW_EXIT_CODE}"
+
+echo "[ENTRYPOINT] Listing contents of Nextflow output directory (\${LOCAL_NF_OUTPUT_PATH}):"
+ls -laR "\${LOCAL_NF_OUTPUT_PATH}" || echo "[WARN] Could not list Nextflow output directory contents."
+
+echo "--- dsub entrypoint script finished: \$(date) ---"
+exit \${NEXTFLOW_EXIT_CODE}
 EOF
 chmod +x "${DSUB_ENTRYPOINT_SCRIPT_PATH}"
 
-# 3. Define dsub Job Name and Output Path
-JOB_NAME_PREFIX="aou-nf-vcfqc-fixed" # Specific prefix
+# 3. Define dsub Job Name and GCS Output Path for dsub
+JOB_NAME_PREFIX="aou-nf-vcfqc-final"
 RANDOM_SUFFIX=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 6)
 JOB_NAME="${JOB_NAME_PREFIX}-$(date +%Y%m%d-%H%M%S)-${RANDOM_SUFFIX}"
-# Define where Nextflow saves outputs locally (must match params.output_dir_local in nextflow.config)
-NEXTFLOW_LOCAL_OUTPUT_PATH="/mnt/data/workingdir/pipeline_results"
-# Define the final GCS destination for those outputs
-GCS_OUTPUT_PATH="${WORKSPACE_BUCKET}/dsub_results/${JOB_NAME}/pipeline_results/"
+GCS_FINAL_RESULTS_PATH="${WORKSPACE_BUCKET}/dsub_results/${JOB_NAME}/pipeline_outputs/"
 
 log_submitter "INFO: Submitting dsub job named: ${JOB_NAME}"
 log_submitter "INFO: Using image: ${TARGET_IMAGE}"
-log_submitter "INFO: Final results will be copied to: ${GCS_OUTPUT_PATH}"
+log_submitter "INFO: Final Nextflow results will be copied by dsub to: ${GCS_FINAL_RESULTS_PATH}"
 
-# 4. Submit the job using dsub (capturing output to parse Job ID)
+# 4. Submit the job using dsub
 DSUB_SUBMIT_OUTPUT_CAPTURE=$(mktemp "/tmp/dsub_submit_output_XXXXXX.txt")
 trap 'rm -f "${DSUB_ENTRYPOINT_SCRIPT_PATH}" "${DSUB_SUBMIT_OUTPUT_CAPTURE}"' EXIT # Update trap
 
 LAUNCHED_DSUB_JOB_ID=""
 SUBMISSION_EXIT_STATUS=-1
 
+# The aou_dsub function defined earlier is not strictly needed if we inline the call
+# For simplicity here, direct dsub call:
+DSUB_USER_SHORTNAME="$(echo "${OWNER_EMAIL}" | cut -d@ -f1)"
+DSUB_SERVICE_ACCOUNT="$(gcloud config get-value account 2>/dev/null || echo "${OWNER_EMAIL}")"
+
+log_submitter "INFO: Submitting with User=${DSUB_USER_SHORTNAME}, Project=${GOOGLE_PROJECT}, SA=${DSUB_SERVICE_ACCOUNT}"
+
 if { dsub \
       --provider google-cls-v2 \
       --project "${GOOGLE_PROJECT}" \
       --user-project "${GOOGLE_PROJECT}" \
-      --user "$(echo "${OWNER_EMAIL}" | cut -d@ -f1)" \
-      --service-account "$(gcloud config get-value account 2>/dev/null || echo ${OWNER_EMAIL})" \
+      --user "${DSUB_USER_SHORTNAME}" \
+      --service-account "${DSUB_SERVICE_ACCOUNT}" \
       --network "network" \
       --subnetwork "subnetwork" \
       --regions "us-central1" \
-      --logging "${WORKSPACE_BUCKET}/dsub/logs/{job-name}/$(echo ${OWNER_EMAIL} | cut -d@ -f1)/$(date +'%Y%m%d')/{job-id}.log" \
+      --logging "${WORKSPACE_BUCKET}/dsub/logs/{job-name}/${DSUB_USER_SHORTNAME}/$(date +'%Y%m%d')/{job-id}.log" \
       --name "${JOB_NAME}" \
       --image "${TARGET_IMAGE}" \
       --script "${DSUB_ENTRYPOINT_SCRIPT_PATH}" \
-      --output-recursive "${NEXTFLOW_LOCAL_OUTPUT_PATH}=${GCS_OUTPUT_PATH}" \
+      --output-recursive "${DSUB_NEXTFLOW_OUTPUT_DIR_ENV_VAR}=${GCS_FINAL_RESULTS_PATH}" \
       --min-cores 2 \
       --min-ram 8 \
       --disk-size 150 \
@@ -105,29 +132,24 @@ if { dsub \
     LAUNCHED_DSUB_JOB_ID=$(grep 'Launched job-id:' "${DSUB_SUBMIT_OUTPUT_CAPTURE}" | awk '{print $NF}')
 
     if [[ -n "${LAUNCHED_DSUB_JOB_ID}" ]]; then
-        log_submitter "SUCCESS: dsub job submitted."
+        log_submitter "SUCCESS: dsub job submitted!"
         log_submitter "--> dsub Job ID: ${LAUNCHED_DSUB_JOB_ID}"
         
-        # Construct the exact dstat command for monitoring THIS job
-        DSUB_USER_FOR_MONITOR="$(echo "${OWNER_EMAIL}" | cut -d@ -f1)"
-        DSTAT_COMMAND="dstat --provider google-cls-v2 --project \"${GOOGLE_PROJECT}\" --location us-central1 --users \"${DSUB_USER_FOR_MONITOR}\" --jobs '${LAUNCHED_DSUB_JOB_ID}' --status '*' --full"
+        DSTAT_COMMAND="dstat --provider google-cls-v2 --project \"${GOOGLE_PROJECT}\" --location us-central1 --users \"${DSUB_USER_SHORTNAME}\" --jobs '${LAUNCHED_DSUB_JOB_ID}' --status '*' --full"
         
         log_submitter "--> To monitor status, run:"
         echo 
         echo "${DSTAT_COMMAND}"
-        echo # Add a newline after the command
-        log_submitter "--> To attempt near-real-time logs (requires gcloud alpha, may have latency):"
-        log_submitter "    Run the command above, find the 'logging:' GCS path, then run:"
-        log_submitter "    gcloud alpha storage tail --project=\"${GOOGLE_PROJECT}\" \"GCS_LOG_PATH_FROM_DSTAT\""
 
     else
         log_submitter "ERROR: dsub job submitted, but could not parse Job ID from output:"
-        cat "${DSUB_SUBMIT_OUTPUT_CAPTURE}" >&2 # Send dsub output to stderr on parsing error
+        cat "${DSUB_SUBMIT_OUTPUT_CAPTURE}" >&2
     fi
 else
+    # If SUBMISSION_EXIT_STATUS was not set because the command group itself failed before PIPESTATUS
     [[ "$SUBMISSION_EXIT_STATUS" == -1 ]] && SUBMISSION_EXIT_STATUS=$?
     log_submitter "ERROR: dsub job submission FAILED (Exit Status: ${SUBMISSION_EXIT_STATUS}). See output below:"
-    cat "${DSUB_SUBMIT_OUTPUT_CAPTURE}" >&2 # Send dsub output to stderr on failure
+    cat "${DSUB_SUBMIT_OUTPUT_CAPTURE}" >&2
     exit 1
 fi
 
