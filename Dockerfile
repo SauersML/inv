@@ -9,15 +9,18 @@ ENV PATH="/opt/venv/bin:${PATH}"
 
 RUN set -e && \
     apt-get update && \
-    apt-get install -y --no-install-recommends software-properties-common && \
-    add-apt-repository -y universe && \
-    add-apt-repository -y multiverse && \
-    apt-get update && \
     apt-get install -y --no-install-recommends \
+        software-properties-common \
         apt-transport-https \
         ca-certificates \
         curl \
-        gnupg \
+        gnupg && \
+    \
+    add-apt-repository -y universe && \
+    add-apt-repository -y multiverse && \
+    apt-get update && \
+    \
+    apt-get install -y --no-install-recommends \
         git \
         unzip \
         wget \
@@ -39,10 +42,12 @@ RUN set -e && \
         bcftools \
         samtools \
         gnuplot && \
+    \
     echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee /etc/apt/sources.list.d/google-cloud-sdk.list && \
-    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --yes --dearmor -o /usr/share/keyrings/cloud.google.gpg && \
+    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --yes --dearmor --batch --output /usr/share/keyrings/cloud.google.gpg && \
     apt-get update && \
-    apt-get install -y --no-install-recommends google-cloud-sdk-slim && \
+    apt-get install -y --no-install-recommends google-cloud-sdk && \
+    \
     add-apt-repository ppa:deadsnakes/ppa -y && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -51,6 +56,7 @@ RUN set -e && \
         "python${PYTHON_VERSION_TARGET}-venv" \
         python3-pip && \
     update-alternatives --install /usr/bin/python3 python3 "/usr/bin/python${PYTHON_VERSION_TARGET}" 1 && \
+    \
     python3 -m venv /opt/venv && \
     /opt/venv/bin/python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
     /opt/venv/bin/pip install --no-cache-dir \
@@ -61,10 +67,12 @@ RUN set -e && \
         google-cloud-storage~=2.14.0 \
         matplotlib~=3.8.0 \
         seaborn~=0.13.0 && \
+    \
     cd /opt && \
     curl -fsSL "https://get.nextflow.io" | bash -s "v${NEXTFLOW_VERSION}" && \
     mv nextflow /usr/local/bin/nextflow && \
     cd / && \
+    \
     apt-get purge -y --auto-remove build-essential software-properties-common gnupg && \
     apt-get autoremove -y && \
     apt-get clean && \
