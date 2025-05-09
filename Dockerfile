@@ -8,12 +8,14 @@ ENV PATH="/opt/venv/bin:${PATH}"
 
 RUN set -e && \
     apt-get update -qq && \
+    apt-get install -y --no-install-recommends software-properties-common && \
+    add-apt-repository -y universe && \
+    apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         apt-transport-https \
         ca-certificates \
         curl \
         gnupg \
-        software-properties-common \
         git \
         unzip \
         wget \
@@ -61,7 +63,7 @@ RUN set -e && \
     apt-get purge -y --auto-remove build-essential software-properties-common gnupg && \
     apt-get autoremove -y && \
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache /etc/apt/sources.list.d/google-cloud-sdk.list /etc/apt/sources.list.d/deadsnakes-ubuntu-ppa-jammy.list
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache /etc/apt/sources.list.d/google-cloud-sdk.list /etc/apt/sources.list.d/deadsnakes-ubuntu-ppa*.list /etc/apt/sources.list.d/universe.list || true
 
 WORKDIR /opt/analysis_workspace
 
