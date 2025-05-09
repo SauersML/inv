@@ -136,33 +136,59 @@ if { dsub \
         
         # --- Start Polling Job Status ---
         log_submitter "--> Now polling job status for ${LAUNCHED_DSUB_JOB_ID} every 30 seconds (Press Ctrl+C to stop this script and polling):"
+        
         POLLING_INTERVAL=30 # seconds
+        # Max attempts if dstat initially doesn't find the job (e.g., 6 attempts * 5s sleep = 30s for job to appear)
+        MAX_INITIAL_NOT_FOUND_ATTEMPTS=6 
+        INITIAL_NOT_FOUND_COUNT=0
+        
         FINAL_STATUS_OBTAINED=false
-        GCS_LOG_PATH="" # Will be populated once dstat output is parsed
+        GCS_LOG_PATH_FROM_DSTAT="" # Store the GCS log path once found
+        JOB_CURRENT_OVERALL_STATUS="PENDING_SUBMISSION" # Initial state
+
+        # Give the backend a moment before first dstat query
+        log_submitter "[POLLING] Initial short wait for job to register with backend..."
+        sleep 5 
 
         while [[ "${FINAL_STATUS_OBTAINED}" == false ]]; do
-            # Use --full to get all details including logging path and detailed status
-            DSTAT_FULL_OUTPUT=$(dstat --provider google-cls-v2 --project "${GOOGLE_PROJECT}" --location us-central1 --users "${DSUB_USER_SHORTNAME}" --jobs "${LAUNCHED_DSUB_JOB_ID}" --status '*' --full 2>/dev/null || echo "DSTAT_ERROR")
+            DSTAT_FULL_OUTPUT=$(dstat --provider google-cls-v2 --project "${GOOGLE_PROJECT}" --location us-central1 --users "${DSUB_USER_SHORTNAME}" --jobs "${LAUNCHED_DSUB_JOB_ID}" --status '*' --full 2>/dev/null || echo "DSTAT_COMMAND_ERROR")
 
-            if [[ "${DSTAT_FULL_OUTPUT}" == "DSTAT_ERROR" ]]; then
-                log_submitter "[POLLING] WARN: dstat command failed. Retrying in ${POLLING_INTERVAL}s..."
-            elif [[ -z "${DSTAT_FULL_OUTPUT}" || "${DSTAT_FULL_OUTPUT}" == "[]" ]]; then
-                log_submitter "[POLLING] WARN: Job ${LAUNCHED_DSUB_JOB_ID} not found by dstat (might be too soon or already completed/cleaned up from dstat's view). Stopping poll."
-                FINAL_STATUS_OBTAINED=true # Exit loop
+            if [[ "${DSTAT_FULL_OUTPUT}" == "DSTAT_COMMAND_ERROR" ]]; then
+                log_submitter "[POLLING] WARN: dstat command failed. Will retry in ${POLLING_INTERVAL}s."
+                # Do not increment INITIAL_NOT_FOUND_COUNT if dstat itself fails
+            elif [[ -z "${DSTAT_FULL_OUTPUT}" || "${DSTAT_FULL_OUTPUT}" == "[]" ]]; then # dstat returns "[]" for no jobs
+                ((INITIAL_NOT_FOUND_COUNT++))
+                if (( INITIAL_NOT_FOUND_COUNT >= MAX_INITIAL_NOT_FOUND_ATTEMPTS )); then
+                    log_submitter "[POLLING] ERROR: Job ${LAUNCHED_DSUB_JOB_ID} still not found by dstat after ${INITIAL_NOT_FOUND_COUNT} attempts. Stopping poll. Please check manually."
+                    FINAL_STATUS_OBTAINED=true # Exit loop
+                else
+                    log_submitter "[POLLING] WARN: Job ${LAUNCHED_DSUB_JOB_ID} not yet visible to dstat (attempt ${INITIAL_NOT_FOUND_COUNT}/${MAX_INITIAL_NOT_FOUND_ATTEMPTS}). Retrying in ${POLLING_INTERVAL}s..."
+                fi
             else
-                JOB_OVERALL_STATUS=$(echo "${DSTAT_FULL_OUTPUT}" | grep -E '^status:' | awk '{print $2}')
-                JOB_STATUS_DETAIL=$(echo "${DSTAT_FULL_OUTPUT}" | grep -E '^status-detail:' | sed 's/status-detail: //')
-                LAST_UPDATE_TIME=$(echo "${DSTAT_FULL_OUTPUT}" | grep -E '^last-update:' | awk '{print $2}')
+                # Job found by dstat, reset initial not found counter
+                INITIAL_NOT_FOUND_COUNT=0 
                 
-                # Extract GCS Log Path if not already found (it's static once job starts)
-                if [[ -z "$GCS_LOG_PATH" ]]; then
-                    GCS_LOG_PATH=$(echo "${DSTAT_FULL_OUTPUT}" | grep -E '^logging:' | awk '{print $2}')
+                TEMP_JOB_STATUS=$(echo "${DSTAT_FULL_OUTPUT}"       | grep -E '^status:'          | awk '{print $2}'          || true)
+                TEMP_STATUS_DETAIL=$(echo "${DSTAT_FULL_OUTPUT}"    | grep -E '^status-detail:'    | sed 's/status-detail: //' || true)
+                TEMP_LAST_UPDATE=$(echo "${DSTAT_FULL_OUTPUT}"      | grep -E '^last-update:'      | awk '{print $2}'          || true)
+                
+                # Update JOB_CURRENT_OVERALL_STATUS only if successfully parsed
+                if [[ -n "${TEMP_JOB_STATUS}" ]]; then
+                    JOB_CURRENT_OVERALL_STATUS="${TEMP_JOB_STATUS}"
                 fi
 
-                log_submitter "[POLLING $(date +'%Y-%m-%d %H:%M:%S')] Job: ${LAUNCHED_DSUB_JOB_ID} | Status: ${JOB_OVERALL_STATUS} | Detail: ${JOB_STATUS_DETAIL} | Last Update: ${LAST_UPDATE_TIME}"
+                # Extract GCS Log Path once if not already found
+                if [[ -z "$GCS_LOG_PATH_FROM_DSTAT" ]]; then 
+                    TEMP_GCS_LOG_PATH=$(echo "${DSTAT_FULL_OUTPUT}" | grep -E '^logging:'          | awk '{print $2}'          || true)
+                    if [[ -n "${TEMP_GCS_LOG_PATH}" ]]; then
+                        GCS_LOG_PATH_FROM_DSTAT="${TEMP_GCS_LOG_PATH}"
+                    fi
+                fi
 
-                if [[ "${JOB_OVERALL_STATUS}" == "SUCCESS" || "${JOB_OVERALL_STATUS}" == "FAILURE" || "${JOB_OVERALL_STATUS}" == "CANCELED" ]]; then
-                    log_submitter "[POLLING] Job has reached a terminal state: ${JOB_OVERALL_STATUS}."
+                log_submitter "[POLLING $(date +'%Y-%m-%d %H:%M:%S')] Job: ${LAUNCHED_DSUB_JOB_ID} | Status: ${JOB_CURRENT_OVERALL_STATUS} | Detail: ${TEMP_STATUS_DETAIL} | LastUpdate: ${TEMP_LAST_UPDATE}"
+
+                if [[ "${JOB_CURRENT_OVERALL_STATUS}" == "SUCCESS" || "${JOB_CURRENT_OVERALL_STATUS}" == "FAILURE" || "${JOB_CURRENT_OVERALL_STATUS}" == "CANCELED" ]]; then
+                    log_submitter "[POLLING] Job has reached a terminal state: ${JOB_CURRENT_OVERALL_STATUS}."
                     FINAL_STATUS_OBTAINED=true
                 fi
             fi
@@ -173,12 +199,24 @@ if { dsub \
         done # End of while polling loop
 
         log_submitter "--> Polling finished for job ${LAUNCHED_DSUB_JOB_ID}."
-        log_submitter "    Final known status was: ${JOB_OVERALL_STATUS:-UNKNOWN}"
-        if [[ -n "$GCS_LOG_PATH" ]]; then
-             log_submitter "    View full logs at: ${GCS_LOG_PATH}"
-             log_submitter "    Use: gsutil cat ${GCS_LOG_PATH}"
+        log_submitter "    Final reported status: ${JOB_CURRENT_OVERALL_STATUS}"
+        
+        # Display final dstat output again for completeness
+        log_submitter "--> Final detailed dstat output for ${LAUNCHED_DSUB_JOB_ID}:"
+        echo
+        dstat --provider google-cls-v2 --project "${GOOGLE_PROJECT}" --location us-central1 --users "${DSUB_USER_SHORTNAME}" --jobs "${LAUNCHED_DSUB_JOB_ID}" --status '*' --full 2>/dev/null || echo "[POLLING] WARN: Could not get final dstat output for completed/failed job."
+        echo
+
+        if [[ -n "$GCS_LOG_PATH_FROM_DSTAT" ]]; then # If we successfully got the log path from dstat
+             log_submitter "    View full logs at: ${GCS_LOG_PATH_FROM_DSTAT}"
+             log_submitter "    Use command: gsutil cat ${GCS_LOG_PATH_FROM_DSTAT}"
         else
-             log_submitter "    Could not determine GCS log path from dstat. Please check dstat output manually if needed."
+             # Fallback if log path was not found during polling (e.g., job completed extremely fast before dstat showed it)
+             LOG_DATE_FOR_PATH=$(date +'%Y%m%d') # Use current date as used by dsub logging
+             FALLBACK_GCS_LOG_PATH="${WORKSPACE_BUCKET}/dsub/logs/${JOB_NAME}/${DSUB_USER_SHORTNAME}/${LOG_DATE_FOR_PATH}/${LAUNCHED_DSUB_JOB_ID}.log"
+             log_submitter "    Could not determine GCS log path from dstat polling (job might have completed very quickly or dstat failed)."
+             log_submitter "    A likely log path is: ${FALLBACK_GCS_LOG_PATH}"
+             log_submitter "    Use command: gsutil cat ${FALLBACK_GCS_LOG_PATH}"
         fi
         # --- End Polling Job Status ---
     else
