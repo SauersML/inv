@@ -1,3 +1,4 @@
+# Base image with Java 17 (LTS) on Ubuntu Jammy. Nextflow requires Java.
 FROM eclipse-temurin:17-jdk-jammy
 
 ENV PYTHON_VERSION_TARGET=3.11
@@ -7,10 +8,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH="/opt/venv/bin:${PATH}"
 
 RUN set -e && \
-    apt-get update -qq && \
+    apt-get update && \
     apt-get install -y --no-install-recommends software-properties-common && \
     add-apt-repository -y universe && \
-    apt-get update -qq && \
+    add-apt-repository -y multiverse && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
         apt-transport-https \
         ca-certificates \
@@ -26,6 +28,7 @@ RUN set -e && \
         libreadline-dev \
         libsqlite3-dev \
         llvm \
+        libncurses5-dev \
         libncursesw5-dev \
         xz-utils \
         tk-dev \
@@ -34,12 +37,12 @@ RUN set -e && \
         bcftools \
         htslib-tools \
         gnuplot && \
-    echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list && \
-    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg && \
-    apt-get update -qq && \
+    echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee /etc/apt/sources.list.d/google-cloud-sdk.list && \
+    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --yes --dearmor -o /usr/share/keyrings/cloud.google.gpg && \
+    apt-get update && \
     apt-get install -y --no-install-recommends google-cloud-sdk-slim && \
     add-apt-repository ppa:deadsnakes/ppa -y && \
-    apt-get update -qq && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
         "python${PYTHON_VERSION_TARGET}" \
         "python${PYTHON_VERSION_TARGET}-dev" \
@@ -63,7 +66,11 @@ RUN set -e && \
     apt-get purge -y --auto-remove build-essential software-properties-common gnupg && \
     apt-get autoremove -y && \
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache /etc/apt/sources.list.d/google-cloud-sdk.list /etc/apt/sources.list.d/deadsnakes-ubuntu-ppa*.list /etc/apt/sources.list.d/universe.list || true
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache && \
+    find /etc/apt/sources.list.d/ -type f -name 'google-cloud-sdk.list' -delete && \
+    find /etc/apt/sources.list.d/ -type f -name 'deadsnakes-ubuntu-ppa-*.list' -delete && \
+    find /etc/apt/sources.list.d/ -type f -name 'universe.list' -delete || true && \
+    find /etc/apt/sources.list.d/ -type f -name 'multiverse.list' -delete || true
 
 WORKDIR /opt/analysis_workspace
 
