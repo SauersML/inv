@@ -83,7 +83,7 @@ EOF
 chmod +x "${DSUB_ENTRYPOINT_SCRIPT_PATH}"
 
 # 3. Define dsub Job Name and GCS Output Path for dsub
-JOB_NAME_PREFIX="aou-nf-vcfqc-final"
+JOB_NAME_PREFIX="aou-nf-vcfqc-poll" # Updated prefix
 RANDOM_SUFFIX=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 6)
 JOB_NAME="${JOB_NAME_PREFIX}-$(date +%Y%m%d-%H%M%S)-${RANDOM_SUFFIX}"
 GCS_FINAL_RESULTS_PATH="${WORKSPACE_BUCKET}/dsub_results/${JOB_NAME}/pipeline_outputs/"
@@ -134,50 +134,53 @@ if { dsub \
         log_submitter "SUCCESS: dsub job submitted!"
         log_submitter "--> dsub Job ID: ${LAUNCHED_DSUB_JOB_ID}"
         
-        # Construct the dstat command using the globally available DSUB_USER_SHORTNAME
-        DSTAT_COMMAND="dstat --provider google-cls-v2 --project \"${GOOGLE_PROJECT}\" --location us-central1 --users \"${DSUB_USER_SHORTNAME}\" --jobs '${LAUNCHED_DSUB_JOB_ID}' --status '*' --full"
-        
-        log_submitter "--> For detailed status, you can run this in another terminal if needed:"
-        echo 
-        echo "    ${DSTAT_COMMAND}"
-        echo 
-        
-        # Construct the GCS log path for this specific job
-        LOG_DATE_FOR_PATH=$(date +'%Y%m%d') 
-        GCS_LOG_PATH="${WORKSPACE_BUCKET}/dsub/logs/${JOB_NAME}/${DSUB_USER_SHORTNAME}/${LOG_DATE_FOR_PATH}/${LAUNCHED_DSUB_JOB_ID}.log"
+        # --- Start Polling Job Status ---
+        log_submitter "--> Now polling job status for ${LAUNCHED_DSUB_JOB_ID} every 30 seconds (Press Ctrl+C to stop this script and polling):"
+        POLLING_INTERVAL=30 # seconds
+        FINAL_STATUS_OBTAINED=false
+        GCS_LOG_PATH="" # Will be populated once dstat output is parsed
 
-        log_submitter "--> Attempting to stream logs from: ${GCS_LOG_PATH}"
-        log_submitter "    (This requires gcloud alpha components. Press Ctrl+C to stop tailing.)"
-        log_submitter "    (Allowing up to 30 seconds for log file to be created by dsub...)"
-        
-        LOG_FILE_EXISTS=false
-        for i in {1..6}; do # Check every 5 seconds for up to 30 seconds
-            if gsutil -u "${GOOGLE_PROJECT}" stat "${GCS_LOG_PATH}" &>/dev/null; then
-                log_submitter "    Log file found. Starting tail..."
-                LOG_FILE_EXISTS=true
-                break
-            else
-                log_submitter "    Log file not yet found, waiting 5s (attempt $i/6)..."
-                sleep 5
-            fi
-        done
+        while [[ "${FINAL_STATUS_OBTAINED}" == false ]]; do
+            # Use --full to get all details including logging path and detailed status
+            DSTAT_FULL_OUTPUT=$(dstat --provider google-cls-v2 --project "${GOOGLE_PROJECT}" --location us-central1 --users "${DSUB_USER_SHORTNAME}" --jobs "${LAUNCHED_DSUB_JOB_ID}" --status '*' --full 2>/dev/null || echo "DSTAT_ERROR")
 
-        if [[ "${LOG_FILE_EXISTS}" == true ]]; then
-            if command -v gcloud &> /dev/null && gcloud alpha storage help &> /dev/null; then
-                echo
-                log_submitter ">>> Streaming logs (Press Ctrl+C to stop stream and end this script):"
-                # The trap for EXIT will clean up temp files when Ctrl+C is pressed here.
-                gcloud alpha storage tail --project="${GOOGLE_PROJECT}" "${GCS_LOG_PATH}" || \
-                    log_submitter "WARN: 'gcloud alpha storage tail' ended. This might be due to an error, job completion, or Ctrl+C."
-                echo
+            if [[ "${DSTAT_FULL_OUTPUT}" == "DSTAT_ERROR" ]]; then
+                log_submitter "[POLLING] WARN: dstat command failed. Retrying in ${POLLING_INTERVAL}s..."
+            elif [[ -z "${DSTAT_FULL_OUTPUT}" || "${DSTAT_FULL_OUTPUT}" == "[]" ]]; then
+                log_submitter "[POLLING] WARN: Job ${LAUNCHED_DSUB_JOB_ID} not found by dstat (might be too soon or already completed/cleaned up from dstat's view). Stopping poll."
+                FINAL_STATUS_OBTAINED=true # Exit loop
             else
-                log_submitter "WARN: 'gcloud alpha storage tail' command not found or 'gcloud alpha' components not installed."
-                log_submitter "      Please monitor job using the dstat command and check GCS log path manually: ${GCS_LOG_PATH}"
+                JOB_OVERALL_STATUS=$(echo "${DSTAT_FULL_OUTPUT}" | grep -E '^status:' | awk '{print $2}')
+                JOB_STATUS_DETAIL=$(echo "${DSTAT_FULL_OUTPUT}" | grep -E '^status-detail:' | sed 's/status-detail: //')
+                LAST_UPDATE_TIME=$(echo "${DSTAT_FULL_OUTPUT}" | grep -E '^last-update:' | awk '{print $2}')
+                
+                # Extract GCS Log Path if not already found (it's static once job starts)
+                if [[ -z "$GCS_LOG_PATH" ]]; then
+                    GCS_LOG_PATH=$(echo "${DSTAT_FULL_OUTPUT}" | grep -E '^logging:' | awk '{print $2}')
+                fi
+
+                log_submitter "[POLLING $(date +'%Y-%m-%d %H:%M:%S')] Job: ${LAUNCHED_DSUB_JOB_ID} | Status: ${JOB_OVERALL_STATUS} | Detail: ${JOB_STATUS_DETAIL} | Last Update: ${LAST_UPDATE_TIME}"
+
+                if [[ "${JOB_OVERALL_STATUS}" == "SUCCESS" || "${JOB_OVERALL_STATUS}" == "FAILURE" || "${JOB_OVERALL_STATUS}" == "CANCELED" ]]; then
+                    log_submitter "[POLLING] Job has reached a terminal state: ${JOB_OVERALL_STATUS}."
+                    FINAL_STATUS_OBTAINED=true
+                fi
             fi
+            
+            if [[ "${FINAL_STATUS_OBTAINED}" == false ]]; then
+                sleep "${POLLING_INTERVAL}"
+            fi
+        done # End of while polling loop
+
+        log_submitter "--> Polling finished for job ${LAUNCHED_DSUB_JOB_ID}."
+        log_submitter "    Final known status was: ${JOB_OVERALL_STATUS:-UNKNOWN}"
+        if [[ -n "$GCS_LOG_PATH" ]]; then
+             log_submitter "    View full logs at: ${GCS_LOG_PATH}"
+             log_submitter "    Use: gsutil cat ${GCS_LOG_PATH}"
         else
-            log_submitter "ERROR: Log file was not found at ${GCS_LOG_PATH} after 30 seconds."
-            log_submitter "       Please monitor job using the dstat command."
+             log_submitter "    Could not determine GCS log path from dstat. Please check dstat output manually if needed."
         fi
+        # --- End Polling Job Status ---
     else
         log_submitter "ERROR: dsub job submitted, but could not parse Job ID from output:"
         cat "${DSUB_SUBMIT_OUTPUT_CAPTURE}" >&2
@@ -189,5 +192,5 @@ else
     exit 1
 fi
 
-log_submitter "--- dsub Job Submission Script Finished (Log tailing may have been interrupted) ---"
+log_submitter "--- dsub Job Submission Script Finished ---"
 exit 0
