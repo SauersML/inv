@@ -25,17 +25,19 @@ RUN set -e && \
         libssl-dev \
         zlib1g-dev \
         libbz2-dev \
+        liblzma-dev \
+        libcurl4-gnutls-dev \
+        libncurses5-dev \
+        libncursesw5-dev \
+        libperl-dev \
         libreadline-dev \
         libsqlite3-dev \
         llvm \
-        libncurses5-dev \
-        libncursesw5-dev \
         xz-utils \
         tk-dev \
         libffi-dev \
-        liblzma-dev \
         bcftools \
-        htslib-tools \
+        samtools \
         gnuplot && \
     echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee /etc/apt/sources.list.d/google-cloud-sdk.list && \
     curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --yes --dearmor -o /usr/share/keyrings/cloud.google.gpg && \
@@ -67,10 +69,7 @@ RUN set -e && \
     apt-get autoremove -y && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache && \
-    find /etc/apt/sources.list.d/ -type f -name 'google-cloud-sdk.list' -delete && \
-    find /etc/apt/sources.list.d/ -type f -name 'deadsnakes-ubuntu-ppa-*.list' -delete && \
-    find /etc/apt/sources.list.d/ -type f -name 'universe.list' -delete || true && \
-    find /etc/apt/sources.list.d/ -type f -name 'multiverse.list' -delete || true
+    find /etc/apt/sources.list.d/ -type f -name '*.list' -delete
 
 WORKDIR /opt/analysis_workspace
 
