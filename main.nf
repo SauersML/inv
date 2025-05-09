@@ -15,32 +15,38 @@ log.info """
     """
 
 // --- Module Imports ---
-// 'modulesDir' is set in nextflow.config to './modules'
+// Modules are expected to be in a 'modules' subdirectory.
+// 'modulesDir' in nextflow.config points to './modules'.
 include { STAGE_VCF         } from './modules/stage_vcf'
 include { EXTRACT_REGION    } from './modules/extract_region'
 include { CALCULATE_STATS   } from './modules/calculate_stats'
 
 // --- Workflow Definition ---
-workflow VCF_QC_PIPELINE {
+// Unnamed workflow, will run by default
+workflow {
+
+    // Validate that essential GCS input paths (now defaulted in config) are indeed present
+    // This is a sanity check; they should always be defined by nextflow.config
+    if (!params.input_vcf_gcs) {
+        error "Pipeline Error: input_vcf_gcs parameter is missing or null in configuration."
+    }
+    if (!params.input_tbi_gcs) {
+        error "Pipeline Error: input_tbi_gcs parameter is missing or null in configuration."
+    }
 
     main:
         // Stage 1: Create a channel that emits the GCS paths for STAGE_VCF
-        // This process expects a single emission: a tuple of [vcf_path_str, tbi_path_str]
         ch_gcs_input_paths = Channel.of( [ params.input_vcf_gcs, params.input_tbi_gcs ] )
 
         // Call STAGE_VCF to download VCF and TBI from GCS
         STAGE_VCF ( ch_gcs_input_paths )
 
         // Stage 2: Extract the specified genomic region
-        // Create a channel for the region string parameter
         ch_target_region = Channel.of( params.region )
-
-        // Call EXTRACT_REGION using the staged files and the target region
         EXTRACT_REGION ( STAGE_VCF.out.staged_files, ch_target_region )
 
         // Stage 3: Calculate variant statistics and generate plots
-        // Call CALCULATE_STATS using the region-extracted VCF files
-        CALCULATE_STATS ( EXTRACT_REGION.out.extracted_region_files )
+        CALCULATE_STATS ( EXTRACT_REGION.out.extracted_files )
 
     emit:
         // Make final outputs available as workflow results
@@ -58,9 +64,9 @@ workflow.onComplete {
     Started        : ${workflow.start}
     Completed at   : ${workflow.complete}
     Duration       : ${workflow.duration}
-    Work Directory : ${workflow.workDir}
-    Launch Directory: ${workflow.launchDir}
-    Final Results (local relative to Nextflow launch): ${params.output_dir_local}
+    Work Dir       : ${workflow.workDir}
+    Launch Dir     : ${workflow.launchDir}
+    Output (Local) : ${params.output_dir_local}
     Container Used : ${workflow.container}
     ----------------------------------------------------
     """
